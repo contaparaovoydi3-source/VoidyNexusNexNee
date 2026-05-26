@@ -216,7 +216,13 @@ const App: React.FC = () => {
   });
 
   // Ativa e gerencia segurança, permissões e registros do Expo Push Notification / Web Sandbox
-  const { expoPushToken, notification: activeNotification, error: notificationError } = useExpoNotifications(user?.uid);
+  const { 
+    expoPushToken, 
+    notification: activeNotification, 
+    error: notificationError,
+    permissionStatus,
+    requestPermission
+  } = useExpoNotifications(user?.uid);
 
   const [isAuthReady, setIsAuthReady] = useState(true);
 
@@ -2524,6 +2530,8 @@ const App: React.FC = () => {
               setIsNotifOpen(false);
             }
           }} 
+          permissionStatus={permissionStatus}
+          onRequestPermission={requestPermission}
         />
       )}
 
