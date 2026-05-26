@@ -222,17 +222,27 @@ export const fetchMessages = async (chatId: string): Promise<ChatMessage[]> => {
     console.error("Erro ao ler as mensagens de contingência local:", e);
   }
 
-  // Mescla e remove quaisquer duplicidades baseado em ID exclusivo
+  // Obter lista de IDs de mensagens excluídas localmente
+  let deletedList: string[] = [];
+  try {
+    const deletedKey = `void_deleted_messages_${chatId}`;
+    const deletedSaved = localStorage.getItem(deletedKey);
+    if (deletedSaved) {
+      deletedList = JSON.parse(deletedSaved);
+    }
+  } catch {}
+
+  // Mescla e remove quaisquer duplicidades baseado em ID exclusivo (ignorando deletados)
   const messagesMap = new Map<string, ChatMessage>();
 
   localFallbackMessages.forEach(msg => {
-    if (msg && msg.id) {
+    if (msg && msg.id && !deletedList.includes(msg.id)) {
       messagesMap.set(msg.id, msg);
     }
   });
 
   dbMessages.forEach(msg => {
-    if (msg && msg.id) {
+    if (msg && msg.id && !deletedList.includes(msg.id)) {
       messagesMap.set(msg.id, msg);
     }
   });
@@ -242,6 +252,45 @@ export const fetchMessages = async (chatId: string): Promise<ChatMessage[]> => {
   mergedList.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
 
   return mergedList;
+};
+
+export const deleteMessage = async (chatId: string, messageId: string): Promise<boolean> => {
+  try {
+    // 1. Registrar o ID deletado no localStorage para efeito imediato local
+    const deletedKey = `void_deleted_messages_${chatId}`;
+    let deletedList: string[] = [];
+    try {
+      const deletedSaved = localStorage.getItem(deletedKey);
+      if (deletedSaved) {
+        deletedList = JSON.parse(deletedSaved);
+      }
+    } catch {}
+    if (!deletedList.includes(messageId)) {
+      deletedList.push(messageId);
+      localStorage.setItem(deletedKey, JSON.stringify(deletedList));
+    }
+
+    // 2. Limpar do fallback/contingência local
+    const localFallbackKey = `void_chat_fallback_messages_${chatId}`;
+    try {
+      const saved = localStorage.getItem(localFallbackKey);
+      if (saved) {
+        const list = JSON.parse(saved);
+        const filtered = list.filter((m: any) => String(m.id) !== String(messageId));
+        localStorage.setItem(localFallbackKey, JSON.stringify(filtered));
+      }
+    } catch {}
+
+    // 3. Remover do Supabase
+    const { error } = await supabase.from('messages').delete().eq('id', messageId);
+    if (error) {
+      console.warn("Erro ao excluir do Supabase (removido localmente apenas por segurança):", error.message);
+    }
+    return !error;
+  } catch (err) {
+    console.error("Erro na função deleteMessage:", err);
+    return false;
+  }
 };
 
 export const fetchMyChats = async (): Promise<ChatRoom[]> => {

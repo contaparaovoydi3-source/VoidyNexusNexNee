@@ -22,6 +22,25 @@ export function useExpoNotifications(userId: string | undefined) {
   const notificationListener = useRef<any>(null);
   const responseListener = useRef<any>(null);
 
+  // Sincroniza o token com a tabela profiles no Supabase imediatamente quando o token for gerado ou o userId for definido
+  useEffect(() => {
+    if (userId && expoPushToken) {
+      const updateProfileToken = async () => {
+        const { error: dbError } = await supabase
+          .from('profiles')
+          .update({ expo_push_token: expoPushToken })
+          .eq('id', userId);
+
+        if (dbError) {
+          console.error('❌ Erro ao atualizar o token de push no Supabase via efeito de sincronização:', dbError);
+        } else {
+          console.log('✅ Token registrado com sucesso no perfil do usuário no Supabase:', userId);
+        }
+      };
+      updateProfileToken();
+    }
+  }, [userId, expoPushToken]);
+
   useEffect(() => {
     async function loadAndRegister() {
       // 1. COMPATIBILIDADE COM NAVEGADOR WEB (AI Studio Preview)

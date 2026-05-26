@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../supabaseClient';
-import { fetchMessages, sendMessage, ChatMessage, uploadChatImage } from '../chatService';
+import { fetchMessages, sendMessage, ChatMessage, uploadChatImage, deleteMessage } from '../chatService';
 
 const renderFormattedContent = (content: string = '') => {
   const tagRegex = /(\[[BbIiCcSs]{1,4}\])/g;
@@ -180,6 +180,15 @@ const GlobalChat: React.FC<GlobalChatProps> = ({
       try {
         const data = await fetchMessages(chatId);
         const filtered = data.filter(m => !m.content || !m.content.startsWith('SINAL_CHAT_BG:'));
+
+        let deletedList: string[] = [];
+        try {
+          const deletedKey = `void_deleted_messages_${chatId}`;
+          const deletedSaved = localStorage.getItem(deletedKey);
+          if (deletedSaved) {
+            deletedList = JSON.parse(deletedSaved);
+          }
+        } catch {}
         
         setMessages(prev => {
           if (filtered.length === 0 && prev.length > 0) {
@@ -216,6 +225,7 @@ const GlobalChat: React.FC<GlobalChatProps> = ({
           });
 
           const cleanedMessages = nextMessages.filter(m => {
+            if (deletedList.includes(m.id)) return false;
             if (m.id.startsWith('temp-')) return true;
             
             // Se a mensagem está no banco de dados, mantém sempre
@@ -964,7 +974,7 @@ const GlobalChat: React.FC<GlobalChatProps> = ({
                 <button 
                   onClick={async () => { 
                     try {
-                      await supabase.from('messages').delete().eq('id', heldMessage.id);
+                      await deleteMessage(chatId, heldMessage.id);
                       setMessages(prev => prev.filter(m => m.id !== heldMessage.id));
                     } catch (err) {
                       console.error("Erro ao deletar sinal:", err);
