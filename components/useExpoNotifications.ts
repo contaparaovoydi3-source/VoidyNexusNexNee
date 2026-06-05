@@ -180,41 +180,78 @@ export function useExpoNotifications(userId: string | undefined) {
         (navigator?.userAgent || '').toLowerCase().includes('median')
       );
 
-      // 1. COMPATIBILIDADE COM NAVEGADOR WEB / MEDIAN
+      // 1. COMPATIBILIDADE COM NAVEGADOR WEB / MEDIAN / VERCEL WRAPPERS
       if (!isReactNative) {
-        if (isMedian) {
-          console.log('📱 [NEXUS] GoNative/Median detectado na inicialização automática.');
-          setPermissionStatus('granted');
-          
+        // Tenta acionar a permissão de Web Notification nativa do navegador/Android WebView imediatamente
+        if (typeof window !== 'undefined' && 'Notification' in window) {
           try {
-            if ((window as any).gonative && (window as any).gonative.push) {
-              if ((window as any).gonative.push.onesignal) {
-                (window as any).gonative.push.onesignal.register();
-              } else {
-                (window as any).gonative.push.register();
+            console.log('🔔 [NEXUS] Solicitando permissão nativa Web Notification ao abrir o app...');
+            window.Notification.requestPermission().then(status => {
+              setPermissionStatus(status);
+              console.log('🔔 [NEXUS] Resposta da permissão de Web Notification:', status);
+              if (status === 'granted') {
+                const mockToken = 'web_sandbox_token_auto_' + Math.random().toString(36).substr(2, 9);
+                setExpoPushToken(mockToken);
               }
-            } else {
-              window.location.href = "gonative://push/onesignal/register";
-            }
-            
-            setTimeout(() => {
-              window.location.href = "gonative://push/onesignal/onesignalInfo?callback=gonative_onesignal_info";
-            }, 1000);
+            }).catch(err => {
+              console.warn('Erro ao chamar Notification.requestPermission:', err);
+            });
           } catch (e) {
-            console.warn('Erro ao disparar ponte GoNative push automática:', e);
+            console.warn('Erro ao acessar a API de Notification.requestPermission:', e);
           }
-          return;
         }
 
-        console.log('🌐 [NEXUS] Ambiente Web detectado. Inicializando suporte a Web Notifications.');
-        
-        if (typeof window !== 'undefined' && 'Notification' in window) {
-          const currentPermission = window.Notification.permission;
-          setPermissionStatus(currentPermission);
+        // Tenta executar a requisição por expo-notifications de forma assíncrona para garantir compatibilidade se houver suporte expo residual
+        try {
+          const nName = 'expo-notifications';
+          const Notifications = await import(/* @vite-ignore */ nName);
+          console.log('📦 [NEXUS] Módulo expo-notifications importado na Web. Requisitando permissões do Expo...');
+          const { status } = await Notifications.requestPermissionsAsync();
+          setPermissionStatus(status);
+          console.log('📦 [NEXUS] Status obtido do Expo na inicialização Web:', status);
+        } catch (e) {
+          console.log('ℹ️ Módulo expo-notifications em ambiente web convencional está indisponível (comportamento esperado).');
+        }
+
+        if (isMedian) {
+          console.log('📱 [NEXUS] GoNative/Median detectado. Acionando ativação de permissões de push nativas...');
+          setPermissionStatus('granted'); // Define como válido de antemão para liberar interfaces no dashboard
           
-          if (currentPermission === 'granted') {
-            const mockToken = 'web_sandbox_token_auto_' + Math.random().toString(36).substr(2, 9);
-            setExpoPushToken(mockToken);
+          try {
+            // 1. Aciona via Javascript Bridge direto se disponível de imediato
+            if ((window as any).gonative) {
+              const gonative = (window as any).gonative;
+              if (gonative.push) {
+                if (typeof gonative.push.register === 'function') {
+                  console.log('📱 [NEXUS] Executando gonative.push.register()');
+                  gonative.push.register();
+                }
+                if (gonative.push.onesignal && typeof gonative.push.onesignal.register === 'function') {
+                  console.log('📱 [NEXUS] Executando gonative.push.onesignal.register()');
+                  gonative.push.onesignal.register();
+                }
+              }
+            }
+            
+            // 2. Aciona via Custom URL schemes (MUITO mais robusto em WebViews Android) para forçar o pop-up nativo
+            setTimeout(() => {
+              console.log('📱 [NEXUS] Despachando protocolo de registro push genérico do GoNative');
+              window.location.href = "gonative://push/register";
+            }, 100);
+
+            setTimeout(() => {
+              console.log('📱 [NEXUS] Despachando protocolo de registro push do GoNative com OneSignal');
+              window.location.href = "gonative://push/onesignal/register";
+            }, 500);
+
+            // 3. Solicita a coleta de metadados do token / playerId para o callback correspondente
+            setTimeout(() => {
+              console.log('📱 [NEXUS] Solicitando informações do push do GoNative');
+              window.location.href = "gonative://push/onesignal/onesignalInfo?callback=gonative_onesignal_info";
+            }, 1000);
+
+          } catch (e) {
+            console.warn('Erro ao disparar pontes GoNative push:', e);
           }
         }
         return;

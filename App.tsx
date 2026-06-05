@@ -276,6 +276,76 @@ const App: React.FC = () => {
   });
 
   useEffect(() => {
+    // Solicitar de antemão permissões para acessar câmera, galeria, microfone e notificações (Web e wrappers)
+    const requestInitialHardwarePermissions = async () => {
+      // a) Notificações do navegador
+      if (typeof window !== 'undefined' && 'Notification' in window) {
+        try {
+          window.Notification.requestPermission().catch(() => {});
+        } catch (e) {
+          console.warn('Erro ao solicitar permissão de Notificação:', e);
+        }
+      }
+
+      // b) Câmera e Microfone via getUserMedia (Força pop-up nativo em WebViews do Android/iOS)
+      if (typeof navigator !== 'undefined' && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') {
+        try {
+          navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+            .then(stream => {
+              // Para as faixas imediatamente para não deixar câmera/microfone ativos
+              stream.getTracks().forEach(track => track.stop());
+            })
+            .catch(err => {
+              console.warn('Permissão de Câmera/Microfone negada de forma nativa:', err);
+            });
+        } catch (e) {
+          console.warn('Erro ao tentar acionar getUserMedia:', e);
+        }
+      }
+
+      // c) Compatibilidade para Android/iOS criados via median.co / GoNative (URL schemes oficiais de permissão)
+      const isMedian = typeof window !== 'undefined' && (
+        !!(window as any).gonative || 
+        !!(window as any).median || 
+        (navigator?.userAgent || '').toLowerCase().includes('gonative') || 
+        (navigator?.userAgent || '').toLowerCase().includes('median')
+      );
+
+      if (isMedian) {
+        try {
+          console.log('📱 [NEXUS] GoNative/Median detectado. Forçando pop-up nativo de Câmera, Galeria, Microfone e Push...');
+          
+          // Abre permissão de câmera nativa
+          setTimeout(() => {
+            window.location.href = "gonative://camera/request";
+          }, 200);
+
+          // Abre permissão de microfone nativa
+          setTimeout(() => {
+            window.location.href = "gonative://microphone/request";
+          }, 500);
+
+          // Abre permissão de galeria de fotos nativa
+          setTimeout(() => {
+            window.location.href = "gonative://photoLibrary/request";
+          }, 800);
+
+          // Abre permissão de notificações push
+          setTimeout(() => {
+            window.location.href = "gonative://push/register";
+          }, 1100);
+
+          setTimeout(() => {
+            window.location.href = "gonative://push/onesignal/register";
+          }, 1300);
+        } catch (e) {
+          console.warn('Erro ao disparar pontes GoNative de hardware:', e);
+        }
+      }
+    };
+
+    requestInitialHardwarePermissions();
+
     // 1. Verificar sessão atual na carga inicial
     const checkSession = async () => {
       const { data: { session } } = await supabase.auth.getSession();
