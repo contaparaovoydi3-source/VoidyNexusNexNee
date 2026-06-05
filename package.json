@@ -13,6 +13,8 @@
     "@google/genai": "^1.34.0",
     "@supabase/supabase-js": "^2.106.0",
     "@tailwindcss/vite": "^4.2.4",
+    "expo-device": "^56.0.4",
+    "expo-notifications": "^56.0.16",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "tailwindcss": "^4.2.4"

@@ -206,6 +206,25 @@ export function useExpoNotifications(userId: string | undefined) {
           const nName = 'expo-notifications';
           const Notifications = await import(/* @vite-ignore */ nName);
           console.log('📦 [NEXUS] Módulo expo-notifications importado na Web. Requisitando permissões do Expo...');
+          
+          // Registro explícito de canais para o Android na Web/Hybrid Wrapper
+          try {
+            console.log('📦 [NEXUS] Registrando canais de notificação nativos via Expo...');
+            const channelsToRegister = ['default', 'default-channel', 'voidy-notifications', 'notifications'];
+            for (const channelId of channelsToRegister) {
+              await Notifications.setNotificationChannelAsync(channelId, {
+                name: channelId === 'voidy-notifications' ? 'VOIDY Notificações' : 'Notificações Gerais',
+                importance: Notifications.AndroidImportance ? Notifications.AndroidImportance.MAX : 5,
+                vibrationPattern: [0, 250, 250, 250],
+                lightColor: '#00f3ff',
+                sound: 'default'
+              });
+              console.log(`✅ Canal de Notificação '${channelId}' registrado com sucesso.`);
+            }
+          } catch (channelErr) {
+            console.warn('Erro ao definir canais de notificação via Expo:', channelErr);
+          }
+
           const { status } = await Notifications.requestPermissionsAsync();
           setPermissionStatus(status);
           console.log('📦 [NEXUS] Status obtido do Expo na inicialização Web:', status);
@@ -286,12 +305,17 @@ export function useExpoNotifications(userId: string | undefined) {
 
         // Configura canais para Android
         if (Platform.OS === 'android') {
-          await Notifications.setNotificationChannelAsync('default-channel', {
-            name: 'Notificações Gerais',
-            importance: Notifications.AndroidImportance.MAX,
-            vibrationPattern: [0, 250, 250, 250],
-            lightColor: '#FF231F7C',
-          });
+          const channelsToRegister = ['default', 'default-channel', 'voidy-notifications', 'notifications'];
+          for (const channelId of channelsToRegister) {
+            await Notifications.setNotificationChannelAsync(channelId, {
+              name: channelId === 'voidy-notifications' ? 'VOIDY Notificações' : 'Notificações Gerais',
+              importance: Notifications.AndroidImportance.MAX,
+              vibrationPattern: [0, 250, 250, 250],
+              lightColor: '#00f3ff',
+              sound: 'default'
+            });
+            console.log(`✅ Canal de Notificação nativo '${channelId}' registrado.`);
+          }
         }
 
         // Verifica e pede permissões

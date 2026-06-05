@@ -342,6 +342,26 @@ const App: React.FC = () => {
           console.warn('Erro ao disparar pontes GoNative de hardware:', e);
         }
       }
+
+      // d) Registrar os canais de notificação no Android via Expo imediatamente para que o SO libere o botão "Mostrar notificações"
+      try {
+        const nName = 'expo-notifications';
+        const Notifications = await import(/* @vite-ignore */ nName);
+        console.log('📦 [NEXUS] Registrando canais de notificação via Expo em App.tsx...');
+        const channelsToRegister = ['default', 'default-channel', 'voidy-notifications', 'notifications'];
+        for (const channelId of channelsToRegister) {
+          await Notifications.setNotificationChannelAsync(channelId, {
+            name: channelId === 'voidy-notifications' ? 'VOIDY Notificações' : 'Notificações Gerais',
+            importance: Notifications.AndroidImportance ? Notifications.AndroidImportance.MAX : 5,
+            vibrationPattern: [0, 250, 250, 250],
+            lightColor: '#00f3ff',
+            sound: 'default'
+          });
+        }
+        console.log('✅ Canais de Notificação registrados no boot geral.');
+      } catch (e) {
+        console.log('ℹ️ Registro instantâneo de canais do Expo ignorado no browser convencional.');
+      }
     };
 
     requestInitialHardwarePermissions();
