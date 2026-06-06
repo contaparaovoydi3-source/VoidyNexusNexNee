@@ -135,13 +135,16 @@ export function useExpoNotifications(userId: string | undefined) {
       const updateProfileToken = async () => {
         const { error: dbError } = await supabase
           .from('profiles')
-          .update({ expo_push_token: expoPushToken })
+          .update({ 
+            expo_push_token: expoPushToken,
+            onesignal_id: expoPushToken
+          })
           .eq('id', userId);
 
         if (dbError) {
           console.error('❌ Erro ao atualizar o token de push no Supabase via efeito de sincronização:', dbError);
         } else {
-          console.log('✅ Token registrado com sucesso no perfil do usuário no Supabase:', userId);
+          console.log('✅ Token e ID OneSignal registrados com sucesso no perfil do usuário no Supabase:', userId);
         }
       };
       updateProfileToken();
@@ -195,7 +198,52 @@ export function useExpoNotifications(userId: string | undefined) {
           }
         }
 
-        // 3. Se conseguir o ID, atualizar no banco de dados
+        // 3. Tentar acionar as pontes da Median/GoNative para disparar callbacks caso o ID esteja disponível no Wrapper nativo
+        if (typeof window !== 'undefined') {
+          try {
+            const m = (window as any).median;
+            const g = (window as any).gonative;
+
+            // Chamar via bridge javascript direto (Median OneSignal createInfo / onesignalInfo)
+            if (m && m.onesignal) {
+              if (typeof m.onesignal.createInfo === 'function') {
+                m.onesignal.createInfo({ callback: 'gonative_onesignal_info' });
+              }
+              if (typeof m.onesignal.onesignalInfo === 'function') {
+                m.onesignal.onesignalInfo({ callback: 'gonative_onesignal_info' });
+              }
+            }
+
+            // Chamar via bridge javascript direto (GoNative OneSignal createInfo / onesignalInfo)
+            if (g && g.onesignal) {
+              if (typeof g.onesignal.createInfo === 'function') {
+                g.onesignal.createInfo({ callback: 'gonative_onesignal_info' });
+              }
+              if (typeof g.onesignal.onesignalInfo === 'function') {
+                g.onesignal.onesignalInfo({ callback: 'gonative_onesignal_info' });
+              }
+            }
+
+            // Disparar protocolos baseados em URL scheme de carregamento assíncrono para garantir
+            const isMedianWrapper = !!m || !!g || 
+              (navigator?.userAgent || '').toLowerCase().includes('gonative') || 
+              (navigator?.userAgent || '').toLowerCase().includes('median');
+
+            if (isMedianWrapper) {
+              const iframe = document.createElement('iframe');
+              iframe.style.display = 'none';
+              iframe.src = "gonative://push/onesignal/onesignalInfo?callback=gonative_onesignal_info";
+              document.body.appendChild(iframe);
+              setTimeout(() => {
+                if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+              }, 1000);
+            }
+          } catch (bridgeErr) {
+            console.warn('Erro ao disparar pontes de push em plano secundário:', bridgeErr);
+          }
+        }
+
+        // 4. Se conseguir o ID, atualizar no banco de dados diretamente
         if (oneSignalId) {
           const { error: dbError } = await supabase
             .from('profiles')
@@ -244,6 +292,8 @@ export function useExpoNotifications(userId: string | undefined) {
 
       (window as any).gonative_onesignal_info = handleInfo;
       (window as any).gonative_push_info = handleInfo;
+      (window as any).median_onesignal_info = handleInfo;
+      (window as any).median_push_info = handleInfo;
     }
   }, [userId]);
 
