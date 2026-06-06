@@ -148,6 +148,78 @@ export function useExpoNotifications(userId: string | undefined) {
     }
   }, [userId, expoPushToken]);
 
+  // Sincroniza o ID de inscrição do OneSignal com a coluna onesignal_id no Supabase usando OneSignal.User.getPushSubscriptionId()
+  useEffect(() => {
+    if (!userId) return;
+
+    const syncOneSignalId = async () => {
+      try {
+        let oneSignalId: string | null = null;
+
+        // 1. Tentar obter do OneSignal Nativo (React Native / Expo) de forma resiliente
+        if (isReactNative) {
+          try {
+            const oName = 'react-native-onesignal';
+            const OneSignalModule = await import(/* @vite-ignore */ oName);
+            const OneSignal = OneSignalModule.default || OneSignalModule.OneSignal || OneSignalModule;
+            
+            if (OneSignal && OneSignal.User && typeof OneSignal.User.getPushSubscriptionId === 'function') {
+              oneSignalId = OneSignal.User.getPushSubscriptionId();
+              console.log('🔔 [ONESIGNAL] ID de inscrição obtido nativamente:', oneSignalId);
+            } else if (OneSignal && typeof OneSignal.getDeviceState === 'function') {
+              const state = await OneSignal.getDeviceState();
+              oneSignalId = state?.userId || null;
+              console.log('🔔 [ONESIGNAL] ID de inscrição obtido via layout legado DeviceState:', oneSignalId);
+            }
+          } catch (nativeErr) {
+            // Silencioso em browser para evitar logs poluídos
+            console.log('ℹ️ Módulo OneSignal nativo indisponível no browser convencional.');
+          }
+        }
+
+        // 2. Tentar obter do OneSignal Web SDK se injetado no escopo global
+        if (!oneSignalId && typeof window !== 'undefined') {
+          try {
+            const windowOS = (window as any).OneSignal;
+            if (windowOS) {
+              if (windowOS.User && typeof windowOS.User.getPushSubscriptionId === 'function') {
+                oneSignalId = windowOS.User.getPushSubscriptionId();
+                console.log('🔔 [ONESIGNAL] ID de inscrição obtido via Web SDK:', oneSignalId);
+              } else if (typeof windowOS.getUserId === 'function') {
+                oneSignalId = await windowOS.getUserId();
+                console.log('🔔 [ONESIGNAL] ID de inscrição legado obtido via Web SDK:', oneSignalId);
+              }
+            }
+          } catch (webErr) {
+            console.warn('Erro ao capturar ID de push via Web SDK:', webErr);
+          }
+        }
+
+        // 3. Se conseguir o ID, atualizar no banco de dados
+        if (oneSignalId) {
+          const { error: dbError } = await supabase
+            .from('profiles')
+            .update({ onesignal_id: oneSignalId })
+            .eq('id', userId);
+
+          if (dbError) {
+            console.error('❌ Erro ao atualizar onesignal_id no Supabase:', dbError);
+          } else {
+            console.log('✅ ID do OneSignal sincronizado com sucesso na coluna onesignal_id:', oneSignalId);
+          }
+        }
+      } catch (err) {
+        console.error('Erro na sincronização de inscrição do OneSignal:', err);
+      }
+    };
+
+    // Executa imediatamente e agenda verificações sucessivas (OneSignal pode inicializar depois da autenticação)
+    syncOneSignalId();
+    const intervalId = setInterval(syncOneSignalId, 12000);
+
+    return () => clearInterval(intervalId);
+  }, [userId]);
+
   // Registra globalmente callbacks do GoNative/Median para obter o Player ID do OneSignal
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -160,8 +232,12 @@ export function useExpoNotifications(userId: string | undefined) {
           if (userId) {
             await supabase
               .from('profiles')
-              .update({ expo_push_token: token })
+              .update({ 
+                expo_push_token: token,
+                onesignal_id: token
+              })
               .eq('id', userId);
+            console.log('✅ IDs (expo_push_token e onesignal_id) preenchidos com Info do GoNative OneSignal.');
           }
         }
       };
@@ -201,36 +277,7 @@ export function useExpoNotifications(userId: string | undefined) {
           }
         }
 
-        // Tenta executar a requisição por expo-notifications de forma assíncrona para garantir compatibilidade se houver suporte expo residual
-        try {
-          const nName = 'expo-notifications';
-          const Notifications = await import(/* @vite-ignore */ nName);
-          console.log('📦 [NEXUS] Módulo expo-notifications importado na Web. Requisitando permissões do Expo...');
-          
-          // Registro explícito de canais para o Android na Web/Hybrid Wrapper
-          try {
-            console.log('📦 [NEXUS] Registrando canais de notificação nativos via Expo...');
-            const channelsToRegister = ['default', 'default-channel', 'voidy-notifications', 'notifications'];
-            for (const channelId of channelsToRegister) {
-              await Notifications.setNotificationChannelAsync(channelId, {
-                name: channelId === 'voidy-notifications' ? 'VOIDY Notificações' : 'Notificações Gerais',
-                importance: Notifications.AndroidImportance ? Notifications.AndroidImportance.MAX : 5,
-                vibrationPattern: [0, 250, 250, 250],
-                lightColor: '#00f3ff',
-                sound: 'default'
-              });
-              console.log(`✅ Canal de Notificação '${channelId}' registrado com sucesso.`);
-            }
-          } catch (channelErr) {
-            console.warn('Erro ao definir canais de notificação via Expo:', channelErr);
-          }
 
-          const { status } = await Notifications.requestPermissionsAsync();
-          setPermissionStatus(status);
-          console.log('📦 [NEXUS] Status obtido do Expo na inicialização Web:', status);
-        } catch (e) {
-          console.log('ℹ️ Módulo expo-notifications em ambiente web convencional está indisponível (comportamento esperado).');
-        }
 
         if (isMedian) {
           console.log('📱 [NEXUS] GoNative/Median detectado. Acionando ativação de permissões de push nativas...');

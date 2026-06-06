@@ -175,7 +175,7 @@ const GlobalChat: React.FC<GlobalChatProps> = ({
 
     loadChatAndMessages();
 
-    // Polling fallback - recarrega as mensagens do banco a cada 3 segundos como redundância garantida
+    // Polling fallback - recarrega as mensagens do banco a cada 1.2 segundos como redundância rápida garantida
     const pollingIntervalId = setInterval(async () => {
       try {
         const data = await fetchMessages(chatId);
@@ -257,7 +257,7 @@ const GlobalChat: React.FC<GlobalChatProps> = ({
       } catch (err) {
         console.warn("Falha no polling de mensagens redundante:", err);
       }
-    }, 3000);
+    }, 1200);
 
     // Canal em Tempo Real para Mensagens e alteração de Fundo
     const messageChannel = supabase
@@ -314,6 +314,58 @@ const GlobalChat: React.FC<GlobalChatProps> = ({
 
     messageChannelRef.current = messageChannel;
 
+    // Canal para escutar diretamente inserções físicas da tabela de mensagens do Supabase em tempo real (fallback robusto do Broadcast)
+    const pgMessagesChannel = supabase
+      .channel(`chat:db-inserts:${chatId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages'
+        },
+        async (payload) => {
+          const inserted = payload.new as any;
+          if (!inserted || !inserted.content) return;
+          
+          const targetPrefix = `[chat_id:${chatId}]`;
+          if (inserted.content.startsWith(targetPrefix)) {
+            const rawContent = inserted.content;
+            const cleanContent = rawContent.slice(targetPrefix.length);
+            
+            const dbMsg: ChatMessage = {
+              id: String(inserted.id),
+              chat_id: chatId,
+              sender_id: String(inserted.user_id || ''),
+              content: cleanContent,
+              created_at: inserted.created_at || new Date().toISOString()
+            };
+
+            if (dbMsg.sender_id !== currentUserId) {
+              // Salva para contingência local
+              try {
+                const localFallbackKey = `void_chat_fallback_messages_${chatId}`;
+                const localSaved = localStorage.getItem(localFallbackKey);
+                const list = localSaved ? JSON.parse(localSaved) : [];
+                if (!list.some((m: any) => m.id === dbMsg.id)) {
+                  list.push(dbMsg);
+                  localStorage.setItem(localFallbackKey, JSON.stringify(list));
+                }
+              } catch (e) {
+                console.warn(e);
+              }
+
+              setMessages(prev => {
+                if (prev.find(m => m.id === dbMsg.id)) return prev;
+                const filtered = prev.filter(m => !(m.id.startsWith('temp-') && m.sender_id === dbMsg.sender_id && m.content === dbMsg.content));
+                return [...filtered, dbMsg].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+              });
+            }
+          }
+        }
+      )
+      .subscribe();
+
     // Canal em Tempo Real para Atualizações do Chat (como mudar o fundo)
     const chatChannel = supabase
       .channel(`chat:metadata:${chatId}`)
@@ -340,6 +392,7 @@ const GlobalChat: React.FC<GlobalChatProps> = ({
       clearInterval(pollingIntervalId);
       supabase.removeChannel(messageChannel);
       supabase.removeChannel(chatChannel);
+      supabase.removeChannel(pgMessagesChannel);
       messageChannelRef.current = null;
       setPartnerIsTyping(false);
     };
@@ -503,6 +556,33 @@ const GlobalChat: React.FC<GlobalChatProps> = ({
    =============================================================================
   */
 
+  const handleResend = async (failedMsg: ChatMessage) => {
+    // Atualiza status localmente para "sending" enquanto retransmite
+    setMessages(prev => prev.map(m => m.id === failedMsg.id ? { ...m, status: 'sending' } : m));
+
+    try {
+      const realMessage = await sendMessage(chatId, failedMsg.content);
+      const confirmedMessage: ChatMessage = {
+        ...realMessage,
+        status: 'sent'
+      };
+
+      setMessages(prev => prev.map(m => m.id === failedMsg.id ? confirmedMessage : m));
+
+      // Broadcast do sinal retransmitido
+      if (messageChannelRef.current) {
+        messageChannelRef.current.send({
+          type: 'broadcast',
+          event: 'new_msg',
+          payload: { message: realMessage }
+        });
+      }
+    } catch (err) {
+      console.error("Erro ao reenviar mensagem:", err);
+      setMessages(prev => prev.map(m => m.id === failedMsg.id ? { ...m, status: 'error' } : m));
+    }
+  };
+
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputText.trim()) return;
@@ -521,7 +601,8 @@ const GlobalChat: React.FC<GlobalChatProps> = ({
       chat_id: chatId,
       sender_id: currentUserId,
       content: text,
-      created_at: new Date().toISOString()
+      created_at: new Date().toISOString(),
+      status: 'sending'
     };
     setMessages(prev => [...prev, optimisticMessage]);
 
@@ -530,7 +611,11 @@ const GlobalChat: React.FC<GlobalChatProps> = ({
       const realMessage = await sendMessage(chatId, text);
 
       // Substitui a mensagem otimista temporária do estado interno com o resultado persistido/híbrido
-      setMessages(prev => prev.map(m => m.id === tempId ? realMessage : m));
+      const confirmedMessage: ChatMessage = {
+        ...realMessage,
+        status: 'sent'
+      };
+      setMessages(prev => prev.map(m => m.id === tempId ? confirmedMessage : m));
       
       // Broadcast do sinal da mensagem instantaneamente via canal ativo para entrega em tempo real
       if (messageChannelRef.current) {
@@ -542,13 +627,14 @@ const GlobalChat: React.FC<GlobalChatProps> = ({
       }
     } catch (err) {
       console.error("Erro ao enviar mensagem:", err);
-      // Mantém a mensagem de forma segura no estado sem apagá-la, recorrendo a garantias híbridas locais
+      // Mantém a mensagem de forma segura no estado marcado como falha para permitir o reenvio
       const fallbackMsg: ChatMessage = {
-        id: `local-err-${Date.now()}`,
+        id: tempId, // Mantém o mesmo id da tentativa para que o retry funcione perfeitamente
         chat_id: chatId,
         sender_id: currentUserId,
         content: text,
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
+        status: 'error'
       };
       setMessages(prev => prev.map(m => m.id === tempId ? fallbackMsg : m));
     }
@@ -562,34 +648,66 @@ const GlobalChat: React.FC<GlobalChatProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setIsUploading(true);
-    try {
-      const imageUrl = await uploadChatImage(file);
-      const realMessage = await sendMessage(chatId, `SINAL_IMG:${imageUrl}`);
-      if (realMessage) {
-        setMessages(prev => {
-          if (prev.find(m => m.id === realMessage.id)) return prev;
-          return [...prev, realMessage];
-        });
-        if (messageChannelRef.current) {
-          messageChannelRef.current.send({
-            type: 'broadcast',
-            event: 'new_msg',
-            payload: { message: realMessage }
-          });
+    // Criar um leitor de arquivo para fins de Optimistic UI da imagem instantânea localmente
+    const reader = new FileReader();
+    const tempId = `temp-img-${Date.now()}`;
+
+    reader.onloadend = async () => {
+      const localDataUrl = reader.result as string;
+      const optimisticMsg: ChatMessage = {
+        id: tempId,
+        chat_id: chatId,
+        sender_id: currentUserId,
+        content: `SINAL_IMG:${localDataUrl}`,
+        created_at: new Date().toISOString(),
+        status: 'sending'
+      };
+
+      setMessages(prev => [...prev, optimisticMsg]);
+      setIsUploading(true);
+
+      try {
+        const imageUrl = await uploadChatImage(file);
+        const realMessage = await sendMessage(chatId, `SINAL_IMG:${imageUrl}`);
+        if (realMessage) {
+          const confirmedMessage: ChatMessage = {
+            ...realMessage,
+            status: 'sent'
+          };
+          setMessages(prev => prev.map(m => m.id === tempId ? confirmedMessage : m));
+          if (messageChannelRef.current) {
+            messageChannelRef.current.send({
+              type: 'broadcast',
+              event: 'new_msg',
+              payload: { message: realMessage }
+            });
+          }
         }
+      } catch (err: any) {
+        console.error("Erro no upload de imagem:", err);
+        // Em caso de falha, marca como erro para o usuário saber e tentar novamente
+        const fallbackMsg: ChatMessage = {
+          id: tempId,
+          chat_id: chatId,
+          sender_id: currentUserId,
+          content: `SINAL_IMG:${localDataUrl}`,
+          created_at: new Date().toISOString(),
+          status: 'error'
+        };
+        setMessages(prev => prev.map(m => m.id === tempId ? fallbackMsg : m));
+
+        if (err.message && err.message.includes('CONFIG_REQUIRED')) {
+          alert(err.message.replace('CONFIG_REQUIRED: ', ''));
+        } else {
+          alert("Falha ao transmitir imagem. Verifique se o bucket 'chat-images' existe no Supabase.");
+        }
+      } finally {
+        setIsUploading(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
       }
-    } catch (err: any) {
-      console.error("Erro no upload de imagem:", err);
-      if (err.message && err.message.includes('CONFIG_REQUIRED')) {
-        alert(err.message.replace('CONFIG_REQUIRED: ', ''));
-      } else {
-        alert("Falha ao transmitir imagem. Verique se o bucket 'chat-images' existe no Supabase.");
-      }
-    } finally {
-      setIsUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
+    };
+
+    reader.readAsDataURL(file);
   };  return (
     <div 
       className="flex-1 h-full w-full relative overflow-hidden flex flex-col animate-in fade-in duration-500 bg-cover bg-center"
@@ -707,9 +825,48 @@ const GlobalChat: React.FC<GlobalChatProps> = ({
                   ) : (
                     renderFormattedContent(rawContent)
                   )}
-                  <span className="block text-[6px] font-black opacity-30 mt-1 uppercase tracking-tighter text-right">
-                    {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </span>
+                  <div className="flex items-center justify-end gap-1 mt-1">
+                    <span className="text-[6.5px] font-black opacity-40 uppercase tracking-tighter col-span-1">
+                      {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                    {isMe && (
+                      <span className="inline-flex items-center select-none shrink-0" style={{ minWidth: '10px' }}>
+                        {(msg.status === 'sending' || msg.id.startsWith('temp-')) && (
+                          <span className="inline-flex items-center gap-0.5" title="Transmitindo...">
+                            <svg className="w-1.5 h-1.5 animate-spin text-cyan-400" fill="none" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4m2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                          </span>
+                        )}
+                        {(msg.status === 'error' || msg.id.startsWith('local-err-')) && (
+                          <span className="text-[6.5px] font-bold text-rose-500" title="Falha ao Transmitir">⚠️</span>
+                        )}
+                        {(msg.status === 'sent' || (!msg.status && !msg.id.startsWith('temp-') && !msg.id.startsWith('local-err-'))) && (
+                          <span className="text-[7.5px] font-black text-cyan-400 tracking-tighter" title="Sinal Entregue">✓✓</span>
+                        )}
+                      </span>
+                    )}
+                  </div>
+
+                  {isMe && (msg.status === 'error' || msg.id.startsWith('local-err-')) && (
+                    <div className="flex items-center justify-between gap-4 mt-2 pt-1.5 border-t border-rose-500/10">
+                      <span className="text-[6.5px] font-black text-rose-400 uppercase tracking-wider flex items-center gap-1">
+                        ⚠️ Erro na transmissão
+                      </span>
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleResend(msg);
+                        }}
+                        onMouseDown={e => e.stopPropagation()}
+                        onTouchStart={e => e.stopPropagation()}
+                        className="text-[7.5px] font-black uppercase text-cyan-300 hover:text-cyan-200 bg-white/5 active:bg-white/10 px-1.5 py-0.5 rounded cursor-pointer transition-all active:scale-95"
+                      >
+                        Reenviar ↻
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             );
